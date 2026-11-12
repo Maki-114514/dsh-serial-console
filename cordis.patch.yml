@@ -1,0 +1,5 @@
+# Row inserted into the desktop profile bundle patch when this package is
+# installed. The id must stay stable: it is how the row is updated or removed.
+- insert:
+    - id: serial-console
+      name: dsh-serial-console

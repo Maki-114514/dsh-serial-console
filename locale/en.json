@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Serial console",
+    "description": "Stream a serial port into the session view and let the agent read and drive it."
+  }
+}

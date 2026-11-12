@@ -1,0 +1,39 @@
+{
+  "name": "dsh-serial-console",
+  "version": "0.2.2",
+  "private": true,
+  "type": "module",
+  "description": "Serial port console for DSH: stream a serial port into the GUI and let the agent read and drive it on Windows, Linux and macOS.",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./icon": "./icon.png",
+    "./locale/*.json": "./locale/*.json",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "serial-host.ps1",
+    "posix-serial.js",
+    "cordis.patch.yml",
+    "icon.png",
+    "locale/en.json",
+    "locale/zh.json",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  }
+}
