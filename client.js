@@ -21,12 +21,51 @@ window.__ModuleLoader__.load({
     const API = '/serial-console/api'
     const POLL_OPEN_MS = 120
     const POLL_IDLE_MS = 900
-    const POLL_DRAIN_MS = 16
+    // While data is arriving, poll at ~30 Hz instead of once per frame: the
+    // browser coalesces renders per frame anyway, so 16 ms doubled the request
+    // and render load for output that scrolls at the same visual speed.
+    const POLL_DRAIN_MS = 32
     const POLL_ERROR_MS = 900
     const MAX_LOG_CHARS = 200000
     const MAX_DRAWER_ENTRIES = 240
     const DRAWER_KEY = 'dsh-serial-console.drawer'
-    const PRESENCE_MS = 400
+    // Log colouring is a pure view preference: entries keep their original
+    // text, so a wrong rule can only mis-paint, never change what the device
+    // said or what a copy of the log contains.
+    const HIGHLIGHT_KEY = 'dsh-serial-console.highlight'
+    // Editing a rule rewrites the whole visible log; typing must not repaint on
+    // every keystroke, so words and hex fields commit on a short debounce.
+    const HIGHLIGHT_DEBOUNCE_MS = 300
+    const MAX_RULES = 20
+    const MAX_RULE_WORDS = 50
+    const MAX_WORD_CHARS = 64
+    const RULE_PALETTE = ['#e5484d', '#f5a623', '#30a46c', '#3b82f6', '#a855f7', '#ec4899', '#14b8a6', '#f97316']
+    // ESP-IDF level letters. Token colours follow the active theme; a custom
+    // rule paints a literal colour the user picked, so it does not.
+    const LEVEL_COLORS = {
+      E: 'var(--dsw-alias-state-error-primary)',
+      W: 'var(--dsw-alias-state-warn-primary)',
+      I: 'var(--dsw-alias-state-success-primary)',
+      D: 'var(--dsw-alias-brand-primary)',
+      V: 'var(--dsw-alias-label-secondary)',
+    }
+    // `I (397100) tag: message`. A leading ANSI run is tolerated because builds
+    // with CONFIG_LOG_COLORS print one before the level letter.
+    const LEVEL_LINE = /^[ \t]*(?:\x1b\[[0-9;]*m)*([EWIDV])\s*\(\d+\)/
+    // Fallback cadence only: layout hints (transitions, resize, focus, tab
+    // switches) nudge the probes immediately, so this tick only has to catch
+    // visibility changes that fire no event at all. At 400 ms the periodic
+    // checkVisibility/getBoundingClientRect pass was the steady-state layout
+    // cost of a page that merely had a Chat view open.
+    const PRESENCE_MS = 1000
+    // The right document column animates open and closed. The drawer has to
+    // follow it frame by frame: measuring once per PRESENCE_MS tick made the
+    // panel catch up in visible jumps. Every layout hint keeps this follow loop
+    // alive for a short tail of frames after the last change, then it stops.
+    const GEOMETRY_TAIL_MS = 480
+    // Last dock samples, summarised on the status poll so `serial status` can
+    // show whether the panel followed a layout change or jumped.
+    const GEOMETRY_TRACE = 12
     // Dock geometry: the drawer sits inside the message scroller and the
     // scroller reserves the same width on its right, so no Chat text can end up
     // underneath the panel and the right document column is never covered.
@@ -79,6 +118,17 @@ window.__ModuleLoader__.load({
       'off': 'Off',
       'close': 'Close',
       'noRoom': 'Widen the window to dock the serial panel',
+      'badgeOpen': 'Serial connected',
+      'badgeClosed': 'Serial not connected',
+      'badgeError': 'Serial error',
+      'highlightLevels': 'ESP level colors',
+      'highlightCustom': 'Custom colors',
+      'highlightNoRules': 'No rules yet. Add one to color matching lines.',
+      'highlightAddRule': 'Add rule',
+      'highlightWords': 'Match words',
+      'highlightWordsHint': 'Separate words with commas or semicolons',
+      'highlightRemoveRule': 'Remove rule',
+      'highlightColor': 'Color',
     }
 
     const ZH = {
@@ -123,6 +173,17 @@ window.__ModuleLoader__.load({
       'off': '关',
       'close': '关闭',
       'noRoom': '窗口太窄，放不下右侧串口面板',
+      'badgeOpen': '串口已连接',
+      'badgeClosed': '串口未连接',
+      'badgeError': '串口异常',
+      'highlightLevels': 'ESP 级别着色',
+      'highlightCustom': '自定义颜色',
+      'highlightNoRules': '还没有规则，点「新增规则」开始。',
+      'highlightAddRule': '新增规则',
+      'highlightWords': '识别词',
+      'highlightWordsHint': '多个词用逗号或分号分隔',
+      'highlightRemoveRule': '删除规则',
+      'highlightColor': '颜色',
     }
 
     const CSS = `
@@ -131,6 +192,14 @@ window.__ModuleLoader__.load({
 .sc-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dsw-alias-state-idle-primary); flex: 0 0 auto; }
 .sc-dot.is-on { background: var(--dsw-alias-state-success-primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--dsw-alias-state-success-primary) 22%, transparent); }
 .sc-dot.is-err { background: var(--dsw-alias-state-error-primary); }
+/* View-tab dot: painted on the label of the Serial tab, which is the only
+   surface still on screen while the right panel is closed. The tab button gets
+   a data-serial-state attribute from syncTabIndicator; the label text itself is
+   untouched, so the accessible name stays "Serial" and a host change degrades
+   to no dot. */
+[data-conversation-tabs] button[data-serial-state] > span::before { content: ''; display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; vertical-align: 1px; background: var(--dsw-alias-state-idle-primary); }
+[data-conversation-tabs] button[data-serial-state="on"] > span::before { background: var(--dsw-alias-state-success-primary); }
+[data-conversation-tabs] button[data-serial-state="err"] > span::before { background: var(--dsw-alias-state-error-primary); }
 .sc-title { font-weight: 600; }
 .sc-muted { color: var(--dsw-alias-label-secondary); }
 .sc-spacer { flex: 1 1 auto; }
@@ -143,6 +212,21 @@ window.__ModuleLoader__.load({
 .sc-btn:disabled { opacity: .5; cursor: default; }
 .sc-btn.is-primary { background: var(--dsw-alias-brand-primary); border-color: var(--dsw-alias-brand-primary); color: #fff; }
 .sc-btn.is-danger { border-color: var(--dsw-alias-state-error-primary); color: var(--dsw-alias-state-error-primary); }
+.sc-switch { display: inline-flex; align-items: center; gap: 6px; box-sizing: border-box; height: 26px; padding: 0 10px 0 4px; border-radius: 13px; border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font-size: 12px; cursor: pointer; white-space: nowrap; }
+.sc-switch:hover { background: var(--dsw-alias-bg-overlay); }
+.sc-switch:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
+.sc-switch-knob { width: 16px; height: 16px; border-radius: 50%; background: var(--dsw-alias-label-secondary); flex: 0 0 auto; }
+.sc-switch.is-on { border-color: var(--dsw-alias-brand-primary); }
+.sc-switch.is-on .sc-switch-knob { background: var(--dsw-alias-brand-primary); }
+.sc-rules { display: flex; flex-direction: column; gap: 6px; max-height: 168px; overflow: auto; box-sizing: border-box; padding: 8px; border-radius: 8px; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); }
+.sc-rule { display: flex; align-items: center; gap: 6px; }
+.sc-swatch { box-sizing: border-box; width: 26px; height: 26px; flex: 0 0 auto; padding: 0; border: 1px solid var(--dsw-alias-border-l2); border-radius: 6px; background: transparent; cursor: pointer; }
+.sc-swatch::-webkit-color-swatch-wrapper { padding: 2px; }
+.sc-swatch::-webkit-color-swatch { border: 0; border-radius: 4px; }
+.sc-hex { width: 84px; flex: 0 0 auto; font-family: var(--ds-font-family-code, ui-monospace, monospace); }
+.sc-rule-words { flex: 1 1 auto; min-width: 80px; }
+.sc-rule-del { flex: 0 0 auto; width: 26px; padding: 0; }
+.sc-log.is-compact { height: clamp(150px, 34vh, 420px); }
 .sc-log { flex: 0 0 auto; height: clamp(220px, 46vh, 560px); min-height: 0; overflow: auto; box-sizing: border-box; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); font-family: var(--ds-font-family-code, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 .sc-line { white-space: pre-wrap; overflow-wrap: anywhere; }
 .sc-line.is-tx { color: var(--dsw-alias-state-success-primary); }
@@ -225,6 +309,8 @@ window.__ModuleLoader__.load({
     // ---------------------------------------------------------------- store
     // One poller and one log shared by the tab and the drawer.
 
+    let paintSerial = 0
+
     const store = {
       snap: null,
       entries: [],
@@ -239,6 +325,12 @@ window.__ModuleLoader__.load({
       timer: null,
       polling: false,
       disposed: true,
+      // Log colouring: the persisted choice plus the derived, immutable paint
+      // object handed to each row. A new paint identity is what makes a settings
+      // change repaint the visible log; unchanged text never does.
+      highlight: readHighlightPref(),
+      paint: null,
+      paintTimer: null,
       // sessionId -> visible probe instances. A `chat` probe lives inside a
       // Chat page row, so it only reports while the Chat view is the one being
       // displayed; a `dock` probe lives in the composer dock and only proves
@@ -250,7 +342,17 @@ window.__ModuleLoader__.load({
       geometry: null,
       flowEl: null,
       reserve: null,
+      // The mounted drawer node, so a geometry change can move it without a
+      // React render, and the dock width bucket the last render was made for.
+      drawerEl: null,
+      dockSignature: '',
+      observedFlow: null,
+      measureFrame: 0,
+      measureUntil: 0,
+      geoSamples: [],
     }
+
+    store.paint = buildPaint(store.highlight)
 
     function readDrawerPref() {
       try {
@@ -269,6 +371,149 @@ window.__ModuleLoader__.load({
         /* private mode: the choice just does not survive a reload */
       }
       notify()
+    }
+
+    // ------------------------------------------------------------ highlighting
+
+    function defaultHighlight() {
+      return { v: 1, levels: true, custom: false, rules: [] }
+    }
+
+    function escapeRegExp(text) {
+      return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    }
+
+    /** `abc`, `#ABC`, `#aabbcc` and `AABBCC` all normalize to `#aabbcc`. */
+    function normalizeHex(raw) {
+      if (typeof raw !== 'string') return null
+      const match = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(raw.trim())
+      if (!match) return null
+      const digits = match[1].toLowerCase()
+      return '#' + (digits.length === 3 ? digits.replace(/./g, (ch) => ch + ch) : digits)
+    }
+
+    /** Words are separated by ASCII or full-width commas and semicolons. */
+    function parseRuleWords(raw) {
+      if (typeof raw !== 'string') return []
+      const seen = new Set()
+      const words = []
+      for (const part of raw.split(/[,，;；]/)) {
+        const word = part.trim().slice(0, MAX_WORD_CHARS)
+        if (!word) continue
+        const key = word.toLowerCase()
+        if (seen.has(key)) continue
+        seen.add(key)
+        words.push(word)
+        if (words.length >= MAX_RULE_WORDS) break
+      }
+      return words
+    }
+
+    /** Immutable snapshot of the settings; a new identity means "repaint". */
+    function buildPaint(prefs) {
+      const rules = []
+      for (const rule of prefs.rules) {
+        const words = parseRuleWords(rule.words)
+        if (words.length === 0) continue
+        rules.push({ color: rule.color, re: new RegExp(words.map(escapeRegExp).join('|'), 'i') })
+      }
+      return {
+        levels: prefs.levels,
+        custom: prefs.custom,
+        rules,
+        active: prefs.levels || prefs.custom,
+        version: ++paintSerial,
+      }
+    }
+
+    function readHighlightPref() {
+      const fallback = defaultHighlight()
+      let parsed
+      try {
+        const raw = window.localStorage.getItem(HIGHLIGHT_KEY)
+        if (!raw) return fallback
+        parsed = JSON.parse(raw)
+      } catch {
+        return fallback
+      }
+      if (!parsed || typeof parsed !== 'object') return fallback
+      const rules = []
+      const source = Array.isArray(parsed.rules) ? parsed.rules.slice(0, MAX_RULES) : []
+      for (const item of source) {
+        if (!item || typeof item !== 'object') continue
+        const color = normalizeHex(item.color) || RULE_PALETTE[rules.length % RULE_PALETTE.length]
+        rules.push({
+          id: typeof item.id === 'string' && item.id ? item.id : 'r' + (rules.length + 1) + '-' + Math.random().toString(36).slice(2, 8),
+          color,
+          words: typeof item.words === 'string' ? item.words.slice(0, MAX_WORD_CHARS * MAX_RULE_WORDS) : '',
+        })
+      }
+      return { v: 1, levels: parsed.levels !== false, custom: parsed.custom === true, rules }
+    }
+
+    function writeHighlightPref() {
+      try {
+        window.localStorage.setItem(HIGHLIGHT_KEY, JSON.stringify(store.highlight))
+      } catch {
+        /* private mode: the choice just does not survive a reload */
+      }
+    }
+
+    /** Apply immediately: used by switches and by add/remove rule. */
+    function commitHighlight() {
+      if (store.paintTimer) {
+        clearTimeout(store.paintTimer)
+        store.paintTimer = null
+      }
+      store.paint = buildPaint(store.highlight)
+      writeHighlightPref()
+      notify()
+    }
+
+    /** Coalesce keystrokes in the words/hex fields into one repaint. */
+    function scheduleHighlight() {
+      if (store.paintTimer) clearTimeout(store.paintTimer)
+      store.paintTimer = setTimeout(commitHighlight, HIGHLIGHT_DEBOUNCE_MS)
+    }
+
+    /**
+     * Whole-line colour for one line: a custom rule wins over the level colour,
+     * rules are tried in list order, and everything else stays default.
+     */
+    function colorOfLine(line, paint) {
+      if (!paint.active) return ''
+      if (paint.custom) {
+        for (const rule of paint.rules) {
+          if (rule.re.test(line)) return rule.color
+        }
+      }
+      if (paint.levels) {
+        const match = LEVEL_LINE.exec(line)
+        if (match) return LEVEL_COLORS[match[1]] || ''
+      }
+      return ''
+    }
+
+    /**
+     * Decorate one entry's text without altering it: line breaks stay outside
+     * the coloured spans, so copying the log yields exactly the device bytes.
+     */
+    function paintText(text, paint) {
+      if (typeof text !== 'string' || text === '') return text
+      const lines = text.split('\n')
+      if (lines.length === 1) {
+        const color = colorOfLine(lines[0], paint)
+        return color ? h('span', { style: { color } }, lines[0]) : text
+      }
+      const nodes = []
+      for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index]
+        const color = colorOfLine(line, paint)
+        if (color) nodes.push(h('span', { key: 'l' + index, style: { color } }, line))
+        else if (line) nodes.push(line)
+        if (index < lines.length - 1) nodes.push('\n')
+      }
+      return nodes
     }
 
     // Coalesce every append into at most one notification per animation frame:
@@ -359,6 +604,20 @@ window.__ModuleLoader__.load({
           ? Object.assign({}, store.geometry, { reserve: store.reserve ? store.reserve.width : 0 })
           : null,
       }
+      // Dock samples, summarised rather than listed: `serial status` can then
+      // tell a smooth follow (many samples in a short window) from a jump (one
+      // sample, or two far apart) without growing the poll payload.
+      const samples = store.geoSamples
+      if (samples.length > 1) {
+        const first = samples[0]
+        const last = samples[samples.length - 1]
+        payload.dockTrace = {
+          n: samples.length,
+          span: Math.max(0, Math.round(last[0] - first[0])),
+          from: [first[1], first[3]],
+          to: [last[1], last[3]],
+        }
+      }
       return `&ui=${encodeURIComponent(JSON.stringify(payload))}`
     }
 
@@ -395,6 +654,7 @@ window.__ModuleLoader__.load({
         store.polling = false
         store.lastHadData = received > 0
         notify()
+        syncTabIndicator()
       }
     }
 
@@ -423,6 +683,7 @@ window.__ModuleLoader__.load({
       store.generation = 0
       store.entries = []
       store.totalChars = 0
+      syncTabIndicator(true)
       tick()
     }
 
@@ -432,8 +693,19 @@ window.__ModuleLoader__.load({
         clearTimeout(store.timer)
         store.timer = null
       }
+      if (store.paintTimer) {
+        clearTimeout(store.paintTimer)
+        store.paintTimer = null
+      }
+      stopMeasure()
       releaseReserve()
       store.listeners.clear()
+      // A re-enable starts from a clean slate: the old scroller is gone.
+      store.drawerEl = null
+      store.flowEl = null
+      store.geometry = null
+      store.dockSignature = ''
+      store.geoSamples = []
     }
 
     function useSerial() {
@@ -449,12 +721,93 @@ window.__ModuleLoader__.load({
 
     /**
      * One memoized row per log entry: entry objects never change once created,
-     * so a burst only renders the rows it actually added.
+     * so a burst only renders the rows it actually added. The paint object is
+     * part of the comparison because a settings change must repaint the past.
      */
-    const LogLine = React.memo(function LogLine(props) {
-      const entry = props.entry
-      return h('div', { className: `sc-line is-${entry.kind}` }, entry.text)
-    })
+    const LogLine = React.memo(
+      function LogLine(props) {
+        const entry = props.entry
+        const paint = props.paint
+        const body = paint && paint.active && entry.kind === 'rx' ? paintText(entry.text, paint) : entry.text
+        return h('div', { className: `sc-line is-${entry.kind}` }, body)
+      },
+      (prev, next) => prev.entry === next.entry && prev.paint === next.paint,
+    )
+
+    /** Real switch semantics, so keyboard and screen readers see on/off. */
+    function Switch(props) {
+      return h(
+        'button',
+        {
+          type: 'button',
+          className: 'sc-switch' + (props.on ? ' is-on' : ''),
+          role: 'switch',
+          'aria-checked': props.on ? 'true' : 'false',
+          title: props.label,
+          onClick: props.onChange,
+        },
+        h('span', { className: 'sc-switch-knob' }),
+        h('span', {}, props.label),
+      )
+    }
+
+    /**
+     * One custom colour rule. The hex field keeps its own draft so a half-typed
+     * value such as `#1f` neither commits nor jumps back to the old colour;
+     * blur reverts to the last committed value.
+     */
+    function RuleRow(props) {
+      const rule = props.rule
+      const t = props.t
+      const [hex, setHex] = React.useState(rule.color)
+      React.useEffect(() => {
+        setHex(rule.color)
+      }, [rule.color])
+      return h(
+        'div',
+        { className: 'sc-rule' },
+        h('input', {
+          type: 'color',
+          className: 'sc-swatch',
+          value: rule.color,
+          'aria-label': t('highlightColor'),
+          title: t('highlightColor'),
+          onChange: (event) => props.onColor(event.target.value),
+        }),
+        h('input', {
+          className: 'sc-input sc-hex',
+          value: hex,
+          spellCheck: false,
+          'aria-label': t('highlightColor'),
+          onChange: (event) => {
+            const raw = event.target.value
+            setHex(raw)
+            const color = normalizeHex(raw)
+            if (color) props.onColor(color)
+          },
+          onBlur: () => setHex(rule.color),
+        }),
+        h('input', {
+          className: 'sc-input sc-rule-words',
+          value: rule.words,
+          placeholder: t('highlightWordsHint'),
+          spellCheck: false,
+          'aria-label': t('highlightWords'),
+          onChange: (event) => props.onWords(event.target.value),
+        }),
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'sc-btn sc-rule-del',
+            title: t('highlightRemoveRule'),
+            'aria-label': t('highlightRemoveRule'),
+            onClick: props.onRemove,
+          },
+          '×',
+        ),
+      )
+    }
 
     function useFollow(ref, deps) {
       const followRef = React.useRef(true)
@@ -528,6 +881,39 @@ window.__ModuleLoader__.load({
       const portTouchedRef = React.useRef(false)
 
       const t = (key) => translate(key)
+
+      const highlight = store.highlight
+      const rules = highlight.rules
+
+      const setLevels = (on) => {
+        store.highlight = { ...store.highlight, levels: on }
+        commitHighlight()
+      }
+      const setCustom = (on) => {
+        store.highlight = { ...store.highlight, custom: on }
+        commitHighlight()
+      }
+      // Words and hex edits repaint on the debounce; add/remove repaint at once.
+      const updateRules = (next, immediate) => {
+        store.highlight = { ...store.highlight, rules: next }
+        notify()
+        if (immediate) commitHighlight()
+        else scheduleHighlight()
+      }
+      const addRule = () => {
+        if (rules.length >= MAX_RULES) return
+        updateRules(
+          [
+            ...rules,
+            {
+              id: 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+              color: RULE_PALETTE[rules.length % RULE_PALETTE.length],
+              words: '',
+            },
+          ],
+          true,
+        )
+      }
 
       React.useEffect(() => {
         mountedRef.current = true
@@ -783,18 +1169,68 @@ window.__ModuleLoader__.load({
           busy ? h('span', { className: 'sc-hint' }, t('waiting')) : null,
         ),
 
+        h(
+          'div',
+          { className: 'sc-bar' },
+          h(Switch, {
+            on: highlight.levels,
+            label: t('highlightLevels'),
+            onChange: () => setLevels(!highlight.levels),
+          }),
+          h(Switch, {
+            on: highlight.custom,
+            label: t('highlightCustom'),
+            onChange: () => setCustom(!highlight.custom),
+          }),
+          h('span', { className: 'sc-spacer' }),
+          highlight.custom
+            ? h(
+                'button',
+                { className: 'sc-btn', onClick: addRule, disabled: rules.length >= MAX_RULES },
+                t('highlightAddRule'),
+              )
+            : null,
+        ),
+
+        highlight.custom
+          ? h(
+              'div',
+              { className: 'sc-rules' },
+              rules.length === 0
+                ? h('div', { className: 'sc-empty' }, t('highlightNoRules'))
+                : rules.map((rule) =>
+                    h(RuleRow, {
+                      key: rule.id,
+                      rule,
+                      t,
+                      onColor: (color) =>
+                        updateRules(
+                          rules.map((item) => (item.id === rule.id ? { ...item, color } : item)),
+                          false,
+                        ),
+                      onWords: (words) =>
+                        updateRules(
+                          rules.map((item) => (item.id === rule.id ? { ...item, words } : item)),
+                          false,
+                        ),
+                      onRemove: () => updateRules(rules.filter((item) => item.id !== rule.id), true),
+                    }),
+                  ),
+            )
+          : null,
+
         shown ? h('div', { className: 'sc-error' }, shown) : null,
 
         h(
           'div',
-          { className: 'sc-log', ref: logRef },
+          { className: 'sc-log' + (highlight.custom ? ' is-compact' : ''), ref: logRef },
           entries.length === 0
             ? h(
                 'div',
                 { className: 'sc-empty' },
                 connected ? t('empty') : `${t('empty')}\n${t('notConnectedHint')}`,
               )
-            : entries.map((entry) => h(LogLine, { key: entry.id, entry })),
+            : entries.map((entry) => h(LogLine, { key: entry.id, entry, paint: store.paint })),
         ),
 
         h(
@@ -875,14 +1311,144 @@ window.__ModuleLoader__.load({
       return false
     }
 
+    let flowObserver = null
+
+    const frameScheduler =
+      typeof requestAnimationFrame === 'function' ? (fn) => requestAnimationFrame(fn) : (fn) => setTimeout(fn, 16)
+
+    /**
+     * Mounted presence probes re-check their visibility when the layout moves
+     * instead of on a fast timer. Nudges coalesce to a single animation frame
+     * and run each probe's own evaluate, so a tab switch or a column resize is
+     * noticed before the next paint.
+     */
+    const presenceNudges = new Set()
+    let presenceNudgeFrame = 0
+
+    function nudgePresence() {
+      if (presenceNudges.size === 0 || presenceNudgeFrame) return
+      presenceNudgeFrame = frameScheduler(() => {
+        presenceNudgeFrame = 0
+        for (const evaluate of Array.from(presenceNudges)) {
+          try {
+            evaluate()
+          } catch {
+            /* one probe must not break the others */
+          }
+        }
+      })
+    }
+
+    function clockMs() {
+      return typeof performance !== 'undefined' && typeof performance.now === 'function'
+        ? performance.now()
+        : Date.now()
+    }
+
+    function setPx(node, name, value) {
+      const text = `${value}px`
+      if (node.style[name] !== text) node.style[name] = text
+    }
+
+    /**
+     * Move the mounted drawer to the current dock rectangle. Position is pure
+     * style, so it is written straight to the node: geometry arrives once per
+     * animation frame while the right column is moving, and routing that through
+     * a React render would re-render the whole log 60 times a second — which is
+     * what made the follow look choppy. React only re-renders when the dock
+     * width changes, because the reserved padding has to follow that.
+     */
+    function applyDockGeometry() {
+      const node = store.drawerEl
+      if (!node || !node.isConnected) return
+      const dock = computeDock(store.geometry)
+      if (!dock || !dock.ok) return
+      setPx(node, 'right', dock.right)
+      setPx(node, 'top', dock.top)
+      setPx(node, 'height', dock.height)
+      setPx(node, 'width', dock.width)
+      if (node.style.bottom !== 'auto') node.style.bottom = 'auto'
+    }
+
+    function dockSignature(geometry) {
+      const dock = computeDock(geometry)
+      if (!dock) return 'none'
+      if (!dock.ok) return 'tight'
+      return `ok:${dock.width}`
+    }
+
+    /**
+     * Watch the scroller itself: the right document column changes its width, and
+     * ResizeObserver fires on every frame of that CSS transition.
+     */
+    function observeFlow(flow) {
+      if (!flow || typeof ResizeObserver !== 'function') return
+      if (!flowObserver) flowObserver = new ResizeObserver(() => scheduleMeasure(store.flowEl))
+      if (store.observedFlow === flow) return
+      if (store.observedFlow) flowObserver.unobserve(store.observedFlow)
+      store.observedFlow = flow
+      // Border box: the reserve padding is written on this element, and padding
+      // alone must not start another follow loop.
+      flowObserver.observe(flow, { box: 'border-box' })
+    }
+
+    /**
+     * Keep measuring for GEOMETRY_TAIL_MS after the last layout hint. The column
+     * animates for a few hundred milliseconds and every intermediate width
+     * matters, but the loop has to stop by itself once the layout settles — a
+     * permanent frame loop would burn CPU on an idle page.
+     */
+    function scheduleMeasure(flow) {
+      if (flow) store.flowEl = flow
+      store.measureUntil = Math.max(store.measureUntil, clockMs() + GEOMETRY_TAIL_MS)
+      if (store.measureFrame) return
+      const step = () => {
+        store.measureFrame = 0
+        const target = store.flowEl
+        if (target && target.isConnected) updateGeometry(target)
+        if (clockMs() < store.measureUntil) store.measureFrame = frameScheduler(step)
+      }
+      store.measureFrame = frameScheduler(step)
+    }
+
+    function stopMeasure() {
+      store.measureUntil = 0
+      if (store.measureFrame) {
+        if (typeof cancelAnimationFrame === 'function' && typeof requestAnimationFrame === 'function') {
+          cancelAnimationFrame(store.measureFrame)
+        } else {
+          clearTimeout(store.measureFrame)
+        }
+        store.measureFrame = 0
+      }
+      if (flowObserver && store.observedFlow) {
+        flowObserver.unobserve(store.observedFlow)
+        store.observedFlow = null
+      }
+    }
+
     function updateGeometry(flow) {
       if (!flow || !flow.isConnected) return
       store.flowEl = flow
+      observeFlow(flow)
       const next = measureFlow(flow)
-      if (geometryMoved(store.geometry, next)) {
-        store.geometry = next
-        notify()
+      if (!geometryMoved(store.geometry, next)) return
+      store.geometry = next
+      store.geoSamples.push([
+        Math.round(clockMs()),
+        Math.round(next.left),
+        Math.round(next.top),
+        Math.round(next.width),
+        Math.round(next.height),
+      ])
+      if (store.geoSamples.length > GEOMETRY_TRACE) {
+        store.geoSamples.splice(0, store.geoSamples.length - GEOMETRY_TRACE)
       }
+      applyDockGeometry()
+      const signature = dockSignature(next)
+      if (signature === store.dockSignature) return
+      store.dockSignature = signature
+      notify()
     }
 
     /**
@@ -930,15 +1496,18 @@ window.__ModuleLoader__.load({
             }
           }
           apply(visible)
-          if (visible && bucketName === 'chat') updateGeometry(findFlow(node))
+          if (visible && bucketName === 'chat') {
+            const flow = findFlow(node)
+            if (flow) updateGeometry(flow)
+          }
         }
 
         evaluate()
+        presenceNudges.add(evaluate)
         const timer = setInterval(evaluate, PRESENCE_MS)
-        window.addEventListener('resize', evaluate)
         return () => {
+          presenceNudges.delete(evaluate)
           clearInterval(timer)
-          window.removeEventListener('resize', evaluate)
           apply(false)
         }
       }, [sessionId, bucketName])
@@ -1016,9 +1585,73 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // ------------------------------------------------- tab-strip indicator
+    // The View tab row renders each label as plain text and offers no per-view
+    // icon (`conversation.view` takes id/order/label only), so the port state is
+    // painted as a CSS pseudo-element on the tab button after marking it with
+    // `data-serial-state`. The label's text node is never touched.
+
+    /** How often the tab may be re-marked while serial data is flowing. */
+    const INDICATOR_MIN_MS = 250
+    let indicatorStamp = 0
+
+    /**
+     * The single source of the dot's colour and its tooltip text: a poll error
+     * means the host is unreachable and the snapshot it left behind is stale, so
+     * it must not keep the dot green; a failed open leaves `connection.error` on
+     * the snapshot, which is the only place the failure survives while the right
+     * panel is closed.
+     */
+    function serialIndicator() {
+      const connection = (store.snap && store.snap.connection) || {}
+      const pollError = store.error ? String(store.error) : ''
+      const connected = !pollError && isOpen(store.snap)
+      const failure = pollError ? pollError : connected ? '' : String(connection.error || '')
+      const state = failure ? 'err' : connected ? 'on' : 'off'
+      const detail = connected
+        ? `${translate('badgeOpen')} · ${connection.port || translate('port')} @ ${connection.baudRate || ''}`.trim()
+        : failure
+          ? `${translate('badgeError')}: ${failure.slice(0, 160)}`
+          : translate('badgeClosed')
+      return { state, detail }
+    }
+
+    /**
+     * Mark the Serial tab. The tab button carries no view id, so it is found by
+     * its label text inside the tab strip's `data-conversation-tabs` anchor: a
+     * host that renames the anchor or the label just gets no dot, never a wrong
+     * one. Called from the poll loop, so it also repairs the marking after React
+     * remounts a tab.
+     */
+    function syncTabIndicator(force) {
+      if (typeof document === 'undefined') return
+      const now = Date.now()
+      if (!force && now - indicatorStamp < INDICATOR_MIN_MS) return
+      let matched = false
+      try {
+        const label = translate('tab')
+        const { state, detail } = serialIndicator()
+        for (const strip of document.querySelectorAll('[data-conversation-tabs]')) {
+          for (const tab of strip.querySelectorAll('button[role="tab"]')) {
+            if ((tab.textContent || '').trim() !== label) continue
+            matched = true
+            if (tab.dataset.serialState !== state) tab.dataset.serialState = state
+            if (tab.title !== detail) tab.title = detail
+          }
+        }
+      } catch {
+        // A host that renders a different tab row must still keep the poller:
+        // losing the dot is acceptable, losing the console is not.
+      }
+      // While the row is not mounted yet, retry on the next poll: the query is
+      // cheap and the throttle would otherwise freeze a stale colour in place.
+      if (matched) indicatorStamp = now
+    }
+
     function SerialDrawer() {
       const { snap, entries, error } = useSerial()
       const logRef = React.useRef(null)
+      const drawerRef = React.useRef(null)
       const onScroll = useFollow(logRef, [entries])
       const allowed = drawerAllowed(snap)
       const dock = computeDock(store.geometry)
@@ -1032,6 +1665,23 @@ window.__ModuleLoader__.load({
         applyReserve(store.flowEl, reserveWidth)
         return () => releaseReserve()
       }, [reserveWidth])
+
+      // The follow loop exists only for the drawer: while it is hidden there is
+      // nothing to move, so nothing is measured.
+      React.useEffect(() => {
+        if (!allowed) return undefined
+        scheduleMeasure(store.flowEl)
+        return () => stopMeasure()
+      }, [allowed])
+
+      // Register the node so geometry frames can move it without a re-render.
+      React.useLayoutEffect(() => {
+        store.drawerEl = drawerRef.current
+        applyDockGeometry()
+        return () => {
+          if (store.drawerEl === drawerRef.current) store.drawerEl = null
+        }
+      })
 
       if (!allowed) return null
       if (dock && dock.ok === false) return null
@@ -1055,7 +1705,7 @@ window.__ModuleLoader__.load({
         { className: 'sc-drawer-layer' },
         h(
           'section',
-          { className: 'sc-drawer', role: 'region', 'aria-label': translate('drawerTitle'), style },
+          { className: 'sc-drawer', ref: drawerRef, role: 'region', 'aria-label': translate('drawerTitle'), style },
           h(
             'div',
             { className: 'sc-drawer-head' },
@@ -1087,7 +1737,7 @@ window.__ModuleLoader__.load({
             { className: 'sc-drawer-log', ref: logRef, onScroll },
             recent.length === 0
               ? h('div', { className: 'sc-empty' }, translate('drawerEmpty'))
-              : recent.map((entry) => h(LogLine, { key: entry.id, entry })),
+              : recent.map((entry) => h(LogLine, { key: entry.id, entry, paint: store.paint })),
           ),
           error ? h('div', { className: 'sc-error' }, error) : null,
           h('div', { className: 'sc-drawer-foot' }, translate('drawerHint')),
@@ -1095,7 +1745,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    return {
+    const moduleApi = {
       inject: ['slots', 'locale'],
       apply(ctx) {
         ensureStyle(document)
@@ -1104,6 +1754,34 @@ window.__ModuleLoader__.load({
         ctx.effect(() => {
           startPolling()
           return () => stopPolling()
+        })
+        // Layout hints. The right document column animates with a CSS transition,
+        // so `resize` alone is not enough: transition run/end marks the start and
+        // the stop of the movement, and the follow loop covers the frames between.
+        ctx.effect(() => {
+          if (typeof document === 'undefined') return undefined
+          // Any of these hints means "the layout may have moved": the drawer
+          // follows the column frame by frame, and the probes re-check whether
+          // their view is still the one on screen.
+          const kick = () => {
+            scheduleMeasure(store.flowEl)
+            nudgePresence()
+          }
+          window.addEventListener('resize', kick)
+          window.addEventListener('focus', kick)
+          document.addEventListener('visibilitychange', kick)
+          document.addEventListener('transitionrun', kick, true)
+          document.addEventListener('transitionend', kick, true)
+          document.addEventListener('transitioncancel', kick, true)
+          return () => {
+            window.removeEventListener('resize', kick)
+            window.removeEventListener('focus', kick)
+            document.removeEventListener('visibilitychange', kick)
+            document.removeEventListener('transitionrun', kick, true)
+            document.removeEventListener('transitionend', kick, true)
+            document.removeEventListener('transitioncancel', kick, true)
+            stopMeasure()
+          }
         })
         ctx.slots.inject('conversation.view', () =>
           ctx.slots.register(
@@ -1155,6 +1833,9 @@ window.__ModuleLoader__.load({
           probe('dock'),
         )
 
+        // The right panel only exists while it can dock, so the Serial tab in
+        // the View row carries the same dot at all times (see syncTabIndicator).
+
         mount(
           'shell.overlay',
           { name: 'shell.overlay', id: 'serial-drawer', order: 50, locale: NS, label: () => translate('drawerTitle') },
@@ -1162,5 +1843,22 @@ window.__ModuleLoader__.load({
         )
       },
     }
+
+    // Test hook: pure helpers only, exposed when a headless harness asks for
+    // them. A browser never sets the flag, so the loader still sees exactly the
+    // two fields it expects.
+    if (globalThis.__DSH_SERIAL_TEST__) {
+      moduleApi.__serialTest = {
+        parseRuleWords,
+        normalizeHex,
+        buildPaint,
+        paintText,
+        colorOfLine,
+        LEVEL_LINE,
+        LEVEL_COLORS,
+      }
+    }
+
+    return moduleApi
   },
 })

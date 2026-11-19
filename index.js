@@ -115,10 +115,26 @@ function clearBuffer() {
  * poll). `chat` counts probes that live inside Chat page rows, so it is only
  * positive while a Chat view is the one being displayed.
  */
-const ui = { at: 0, chat: 0, dock: 0, ids: [], signature: '', history: [], geo: null }
+const ui = { at: 0, chat: 0, dock: 0, ids: [], signature: '', history: [], geo: null, dockTrace: null }
 
 // Order of the system-prompt section that advertises this tool; 0 = not registered.
 const promptHint = { order: 0 }
+
+/**
+ * Compact description of the last dock samples: how many frames the drawer
+ * followed and over what window, so `serial status` can tell a smooth follow
+ * from a jump.
+ */
+function readDockTrace(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const n = Number(raw.n)
+  const span = Number(raw.span)
+  if (!Number.isFinite(n) || n < 2 || !Number.isFinite(span)) return null
+  const pair = (value) => (Array.isArray(value) && value.length >= 2
+    ? [Number(value[0]) || 0, Number(value[1]) || 0]
+    : [0, 0])
+  return { n: Math.round(n), span: Math.max(0, Math.round(span)), from: pair(raw.from), to: pair(raw.to) }
+}
 
 function readGeoReport(raw) {
   if (!raw) return null
@@ -150,6 +166,7 @@ function readUiReport(raw) {
   const dock = Number(parsed.dock) || 0
   const ids = Array.isArray(parsed.ids) ? parsed.ids.map((value) => String(value)) : []
   const geo = readGeoReport(parsed.geo)
+  ui.dockTrace = readDockTrace(parsed.dockTrace)
   const signature = `${chat}/${dock}/${ids.join(',')}`
   ui.at = Date.now()
   ui.chat = chat
@@ -640,6 +657,9 @@ async function closePort() {
   if (connection.state !== 'open') {
     connection.state = 'closed'
     connection.port = ''
+    // Drop a failure left by the last open attempt: the caller is closing, so
+    // the snapshot must stop reporting an error the user already dismissed.
+    connection.error = ''
     return { ok: true, state: 'closed' }
   }
   const port = connection.port
@@ -723,6 +743,7 @@ function snapshot({ since = 0, includeText = true } = {}) {
       ids: ui.ids.slice(),
       history: ui.history.slice(-6),
       geo: ui.geo,
+      dockTrace: ui.dockTrace,
     },
     promptSection: promptHint.order,
     ports: ports.list,
@@ -1044,6 +1065,16 @@ export function apply(ctx) {
                 )
               } else {
                 lines.push('drawer dock: not measured yet')
+              }
+              const trace = result.ui.dockTrace
+              if (trace && typeof trace === 'object' && Number(trace.n) > 1) {
+                const span = Math.max(1, Number(trace.span) || 0)
+                const rate = Math.round(((Number(trace.n) - 1) * 1000) / span)
+                const from = Array.isArray(trace.from) ? trace.from : [0, 0]
+                const to = Array.isArray(trace.to) ? trace.to : [0, 0]
+                lines.push(
+                  `dock trail: ${trace.n} samples over ${span}ms (~${rate}/s), column ${from[1]}→${to[1]}px from x=${from[0]}→${to[0]}`,
+                )
               }
             }
             if (result.note) lines.push(result.note)
