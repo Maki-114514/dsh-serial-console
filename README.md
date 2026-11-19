@@ -98,6 +98,12 @@ empty string, which is what makes "reset and read the boot log" one tool call
 each instead of a polling loop. Pass `since` (the `cursor` from a previous
 read) to continue where you left off.
 
+Pass the device path on its own. The panel shows each entry as
+`<port> — <label>`, and pasting that whole line (or a `\\.\COM3` form, a bare
+`cu.usbserial-110` / `ttyUSB0`, or a path carrying zero-width characters) is
+repaired before the port is opened — but POSIX paths are case-sensitive, so
+`/dev/cu.usbserial-110` must keep its lower case.
+
 `status` reports which transport is active (`transport: posix (linux)` or
 `transport: powershell (win32)`).
 
