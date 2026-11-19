@@ -79,6 +79,9 @@ export function buildLineConfig(config) {
     'ospeed',
     speed,
     'raw',
+    '-ignbrk',
+    '-brkint',
+    '-parmrk',
     '-echo',
     '-echoe',
     '-echok',
@@ -173,7 +176,7 @@ function frameMatches(readback, line) {
  */
 async function configureLine(device, config, emitNote) {
   const line = buildLineConfig(config)
-  const first = await runStty(device, line.tokens)
+  let first = await runStty(device, line.tokens)
   const show = await runStty(device, ['-a'])
   if (!show.ok) {
     const missing = /ENOENT|not found|command not found/i.test(`${first.out} ${show.out}`)
@@ -188,7 +191,35 @@ async function configureLine(device, config, emitNote) {
     throw new Error(`cannot configure ${device}: ${first.out || 'stty failed'}`)
   }
 
-  const readback = parseSttyShow(show.out)
+  let readback = parseSttyShow(show.out)
+
+  // Some stty builds reject individual keywords (a missing `ispeed`, an
+  // unknown flag). Fall back to the narrow set every POSIX stty understands
+  // before giving up, so an exotic platform still gets a usable line.
+  if (!first.ok && /invalid|unknown|illegal|not supported|usage/i.test(first.out)) {
+    const minimal = [
+      String(line.baudRate),
+      'raw',
+      '-echo',
+      '-ixon',
+      '-crtscts',
+      'clocal',
+      'hupcl',
+      `cs${line.dataBits}`,
+      ...PARITY_TOKENS[line.parity],
+      ...STOP_TOKENS[line.stopBits],
+    ]
+    const minimalRun = await runStty(device, minimal)
+    const minimalShow = await runStty(device, ['-a'])
+    if (minimalShow.ok) readback = parseSttyShow(minimalShow.out)
+    const speedOk = readback.speed === null || readback.speed === line.baudRate
+    if (minimalRun.ok && speedOk) {
+      emitNote(`line: ${line.label} on ${device} (minimal stty set)`)
+      return line
+    }
+    first = minimalRun
+  }
+
   const speedOk = readback.speed === null || readback.speed === line.baudRate
   const bitsOk = readback.dataBits === null || readback.dataBits === line.dataBits
   if (first.ok && speedOk && bitsOk && frameMatches(readback, line)) {

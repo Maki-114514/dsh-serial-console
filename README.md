@@ -54,9 +54,11 @@ Linux), then opens the node with `O_RDWR | O_NOCTTY | O_NONBLOCK` and pumps it
 with `fs.read`/`fs.write`:
 
 - the frame is built from the selected **baud / data bits / parity / stop
-  bits** (default 115200 8N1): `raw -echo -echoe -echok -iexten -ixon -ixoff
-  -istrip -inlcr -igncr -icrnl -opost -isig -icanon -crtscts clocal hupcl
-  cs<n> (-parenb | parenb [-parodd]) (-cstopb | cstopb) min 1 time 0`;
+  bits** (default 115200 8N1): `raw -ignbrk -brkint -parmrk -echo -echoe -echok
+  -iexten -ixon -ixoff -istrip -inlcr -igncr -icrnl -opost -isig -icanon
+  -crtscts clocal hupcl cs<n> (-parenb | parenb [-parodd]) (-cstopb | cstopb)
+  min 1 time 0` — the same set `cfmakeraw` clears, so no byte is invented by the
+  line discipline;
 - the speed is set three ways (`<baud> ispeed <baud> ospeed <baud>`) because a
   USB bridge that keeps a stale **input** speed decodes correctly-bauded bytes
   as noise — the classic "garbage at the right baud rate" symptom;
