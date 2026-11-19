@@ -226,7 +226,7 @@ export function createPosixSerial({ onBytes, onNote } = {}) {
 
   async function open(config) {
     const device = String((config && config.port) || '').trim()
-    if (!device.startsWith('/dev/')) throw new Error(`port must be a device path such as /dev/ttyUSB0 (got "${device}")`)
+    if (!device.startsWith('/dev/')) throw new Error(`port must be a device path such as /dev/ttyUSB0 or /dev/cu.usbserial-1420 (got ${JSON.stringify(device)})`)
     if (!existsSync(device)) throw new Error(`${device} does not exist (refresh the port list)`)
 
     await shutdown()

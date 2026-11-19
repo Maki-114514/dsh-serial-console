@@ -537,7 +537,10 @@ window.__ModuleLoader__.load({
 
       const connect = () =>
         run('connect', async () => {
-          const name = port.trim().toUpperCase()
+          // Do NOT upper-case here: POSIX device paths are case-sensitive
+          // ("/dev/cu.usbserial-110" -> "/DEV/CU.USBSERIAL-110" is not a path).
+          // The server normalises Windows COM names itself (openPort()).
+          const name = port.trim()
           if (!name) throw new Error(t('choosePort'))
           await call('/open', { port: name, baudRate: Number(baud) || 115200, session: sessionId })
           portTouchedRef.current = true

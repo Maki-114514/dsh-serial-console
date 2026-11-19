@@ -506,12 +506,38 @@ async function listPorts() {
   return reply.ports || ports.list
 }
 
+/**
+ * Repair the harmless shapes a port arrives in before it is validated.
+ *
+ * The panel lists an option as `<port> — <label>`, so a copied option or a tool
+ * argument that echoes it carries the label too; Windows also accepts the
+ * `\\.\COM3` device form, and a bare device name (`cu.usbserial-110`,
+ * `ttyUSB0`) is unambiguous on POSIX.
+ */
+function normalizePort(raw) {
+  // Zero-width characters survive a copy/paste and make a correct path unusable.
+  let value = String(raw || '')
+    .replace(/[\u200b-\u200f\u2060\ufeff]/g, '')
+    .trim()
+  const labelled = value.indexOf(' — ')
+  if (labelled > 0) value = value.slice(0, labelled).trim()
+  if (value.startsWith('\\\\.\\')) value = value.slice(4).trim()
+  if (!WINDOWS && !value.startsWith('/dev/') && /^(?:cu\.[\w.-]+|tty(?:USB|ACM|AMA|XRUSB)\d+|rfcomm\d+)$/.test(value)) {
+    value = `/dev/${value}`
+  }
+  return value
+}
+
 async function openPort(options = {}) {
-  const raw = String(options.port || '').trim()
+  const raw = normalizePort(options.port)
   if (WINDOWS) {
-    if (!/^COM\d+$/i.test(raw)) throw new Error('port must look like COM3')
+    if (!/^COM\d+$/i.test(raw)) throw new Error(`port must look like COM3 (got ${JSON.stringify(raw)})`)
   } else if (!raw.startsWith('/dev/')) {
-    throw new Error('port must be a device path such as /dev/ttyUSB0 or /dev/cu.usbserial-1420')
+    // Show the received string verbatim: a case-mangled or truncated path is a
+    // common cause and is invisible when the value is only implied.
+    throw new Error(
+      `port must be a device path such as /dev/ttyUSB0 or /dev/cu.usbserial-1420 (got ${JSON.stringify(raw)})`,
+    )
   }
   const baudRate = Number(options.baudRate) > 0 ? Math.floor(Number(options.baudRate)) : DEFAULT_OPEN.baudRate
   if (baudRate < 50 || baudRate > 4000000) throw new Error('baudRate is out of range')
@@ -886,7 +912,7 @@ export function apply(ctx) {
           port: {
             type: 'string',
             description:
-              'Port for action=open: "COM6" on Windows, "/dev/ttyUSB0" (Linux) or "/dev/cu.usbserial-1420" (macOS).',
+              'Port for action=open: "COM6" on Windows, "/dev/ttyUSB0" (Linux) or "/dev/cu.usbserial-1420" (macOS). Pass the device path only, not the label shown next to it in the Serial view.',
           },
           baudRate: { type: 'number', description: 'Baud rate for action=open. Default 115200.' },
           parity: { type: 'string', description: 'None, Odd, Even, Mark or Space. Default None.' },
