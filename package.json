@@ -1,6 +1,6 @@
 {
   "name": "dsh-serial-console",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "description": "Serial port console for DSH: stream a serial port into the GUI and let the agent read and drive it on Windows, Linux and macOS.",
