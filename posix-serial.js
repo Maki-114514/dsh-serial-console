@@ -400,13 +400,29 @@ export function createPosixSerial({ onBytes, onNote } = {}) {
     await shutdown()
     state.lastError = ''
 
-    const stty = await configureLine(device, config, emitNote)
-
     let handle
     try {
       handle = await openFile(device, FS.O_RDWR | FS.O_NOCTTY | FS.O_NONBLOCK)
     } catch (error) {
       throw new Error(`cannot open ${device}: ${describeError(error)}`)
+    }
+
+    // Line settings must be applied while an fd is open. Several macOS USB
+    // serial drivers (the Silicon Labs CP210x DriverKit one among them) reset
+    // the line coding to 9600 as the last fd closes, so running `stty` on a
+    // closed device — the old order — was silently discarded the moment the
+    // port was opened, and the read-back check failed with "stty reports
+    // speed 9600".
+    let stty
+    try {
+      stty = await configureLine(device, config, emitNote)
+    } catch (error) {
+      try {
+        await handle.close()
+      } catch {
+        /* the failure path must not mask the original error */
+      }
+      throw error
     }
 
     state.handle = handle
