@@ -135,13 +135,29 @@ the scroller.
 
 ## Install
 
+Two ways, both through the **Plugins** page (or the `plugin_manager` tool).
+
+**From this repository** — paste the repository address into the Plugins page:
+
+```
+https://github.com/Maki-114514/dsh-serial-console
+```
+
+The plugin manager accepts Git hosts as install specs, so that URL is cloned and
+packed as-is. Pin a release by appending a ref, for example
+`https://github.com/Maki-114514/dsh-serial-console#v0.2.2`. Upgrade later by
+removing and installing again, since an already-installed package is rejected
+while HMR is active.
+
+**From a local checkout** — point at the directory instead:
+
 ```
 plugin_manager { action: "install_bundle", target: "<absolute path to this directory>" }
 ```
 
 The package ships only `index.js`, `posix-serial.js`, `client.js`,
 `serial-host.ps1`, the patch, the icon and the two locale files; nothing is
-generated at install time.
+generated at install time, so a fresh clone is immediately installable.
 
 ## Layout
 

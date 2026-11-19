@@ -4,6 +4,24 @@
   "private": true,
   "type": "module",
   "description": "Serial port console for DSH: stream a serial port into the GUI and let the agent read and drive it on Windows, Linux and macOS.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Maki-114514/dsh-serial-console.git"
+  },
+  "homepage": "https://github.com/Maki-114514/dsh-serial-console#readme",
+  "bugs": {
+    "url": "https://github.com/Maki-114514/dsh-serial-console/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "serial",
+    "serialport",
+    "uart",
+    "esp32",
+    "idf"
+  ],
   "main": "./index.js",
   "exports": {
     ".": "./index.js",
