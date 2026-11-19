@@ -367,7 +367,7 @@ serial { action: "open", port: "/dev/cu.usbserial-110", baudRate: 115200, dataBi
 https://github.com/Maki-114514/dsh-serial-console
 ```
 
-插件管理器接受 Git 地址作为安装源，所以这个 URL 会被 clone 并按原样打包。要固定到某个发布，在末尾加 ref，例如 `https://github.com/Maki-114514/dsh-serial-console#v0.3.1`。升级时先移除再安装，因为 HMR 激活期间已安装的包会被拒绝。
+插件管理器接受 Git 地址作为安装源，所以这个 URL 会被 clone 并按原样打包。要固定到某个发布，在末尾加 ref，例如 `https://github.com/Maki-114514/dsh-serial-console#v0.4.0`。升级时先移除再安装，因为 HMR 激活期间已安装的包会被拒绝。
 
 **从本地检出安装** —— 直接指向目录：
 

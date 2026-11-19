@@ -4,7 +4,7 @@
 所以最省事的做法是：`git clone` 仓库，再读本文。
 
 - 仓库：<https://github.com/Maki-114514/dsh-serial-console>
-- 当前版本：**0.4.0**（main 分支；最近一次发布 tag 仍是 `v0.3.1`）
+- 当前版本：**0.4.0**（tag `v0.4.0`，main 分支）
 - 平台：Windows / Linux / macOS 一套代码，运行时按 `process.platform` 自动选传输层
 - 状态：Windows 全链路已实测（含真实 ESP32 读取）；macOS 已在 CP2102N + ESP32-S31 上实测通过
   （115200 读到启动日志，见 6.1）。0.4.0 的内容：修复「先 open 再 stty」的驱动复位问题、
@@ -77,7 +77,7 @@ Host（index.js，Cordis 插件）                          │
 | `v0.2.3` | `b8bd075` | **修 Mac 端口路径被大写**导致 `port must be a device path…`；新增 `normalizePort`（标签、`\\.\COM3`、零宽字符、裸 `cu.*`/`ttyUSB*`） |
 | `v0.3.0` | `84911ac` | **乱码修复**（ispeed/ospeed 三写 + `stty -a` 回读校验 + 显式重试）、**数据位/校验/停止位可选**、`line: …` 生效帧格式日志 |
 | `v0.3.1` | `584b22e` | 补齐 `-ignbrk -brkint -parmrk`（对齐 `cfmakeraw`）；stty 关键字不被支持时退回最小参数集 |
-| `0.4.0`（main，未打 tag） | 本次提交 | **先 open 再 stty**（DriverKit 串口驱动在最后一个 fd 关闭时复位行设置，旧顺序会把波特率丢掉）；标签状态点；日志着色（ESP 级别 + 自定义规则）；停靠面板逐帧跟随；presence 轮询 400 ms → 1 s；`closePort` 清掉陈旧错误 |
+| `v0.4.0` | `git rev-parse v0.4.0` | **先 open 再 stty**（DriverKit 串口驱动在最后一个 fd 关闭时复位行设置，旧顺序会把波特率丢掉）；标签状态点；日志着色（ESP 级别 + 自定义规则）；停靠面板逐帧跟随；presence 轮询 400 ms → 1 s；`closePort` 清掉陈旧错误 |
 
 测试数据点（Windows，用于对照）：
 
@@ -93,7 +93,7 @@ Host（index.js，Cordis 插件）                          │
 插件页 → 移除 `dsh-serial-console` → 安装：
 
 ```
-https://github.com/Maki-114514/dsh-serial-console#v0.3.1
+https://github.com/Maki-114514/dsh-serial-console#v0.4.0
 ```
 
 装完**刷新一次页面**（前端 bundle 变了，不刷新看不到新的「数据位/校验/停止位」下拉框）。
@@ -317,5 +317,5 @@ mac-serial-check.sh        Mac 一键诊断脚本（第 7 节的命令封装）
 
 ```sh
 git clone serial-console.bundle dsh-serial-console
-cd dsh-serial-console && git tag      # 应能看到 v0.2.2 … v0.3.1
+cd dsh-serial-console && git tag      # 应能看到 v0.2.2 … v0.4.0
 ```
