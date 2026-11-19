@@ -528,6 +528,54 @@ function normalizePort(raw) {
   return value
 }
 
+const PARITY_NAMES = { none: 'None', even: 'Even', odd: 'Odd', mark: 'Mark', space: 'Space' }
+
+const PARITY_LETTERS = { None: 'N', Even: 'E', Odd: 'O', Mark: 'M', Space: 'S' }
+
+const STOP_LETTERS = { One: '1', Two: '2', OnePointFive: '1.5' }
+
+function parityLetter(parity) {
+  return PARITY_LETTERS[parity] || 'N'
+}
+
+function stopLetter(stopBits) {
+  return STOP_LETTERS[stopBits] || '1'
+}
+
+function normalizeParity(value) {
+  if (value === undefined || value === null || value === '') return DEFAULT_OPEN.parity
+  const name = PARITY_NAMES[String(value).trim().toLowerCase()]
+  if (!name) throw new Error(`parity must be None, Even, Odd, Mark or Space (got ${JSON.stringify(String(value))})`)
+  return name
+}
+
+const STOPBIT_NAMES = {
+  '1': 'One',
+  '2': 'Two',
+  '1.5': 'OnePointFive',
+  one: 'One',
+  two: 'Two',
+  onepointfive: 'OnePointFive',
+  'one-point-five': 'OnePointFive',
+}
+
+function normalizeStopBits(value) {
+  if (value === undefined || value === null || value === '') return DEFAULT_OPEN.stopBits
+  const key = String(value).trim().toLowerCase()
+  const name = STOPBIT_NAMES[key]
+  if (!name) throw new Error(`stopBits must be 1, 2 or 1.5 (got ${JSON.stringify(String(value))})`)
+  return name
+}
+
+function normalizeDataBits(value) {
+  if (value === undefined || value === null || value === '') return DEFAULT_OPEN.dataBits
+  const bits = Math.floor(Number(value))
+  if (!Number.isFinite(bits) || bits < 5 || bits > 8) {
+    throw new Error(`dataBits must be 5, 6, 7 or 8 (got ${JSON.stringify(String(value))})`)
+  }
+  return bits
+}
+
 async function openPort(options = {}) {
   const raw = normalizePort(options.port)
   if (WINDOWS) {
@@ -541,9 +589,15 @@ async function openPort(options = {}) {
   }
   const baudRate = Number(options.baudRate) > 0 ? Math.floor(Number(options.baudRate)) : DEFAULT_OPEN.baudRate
   if (baudRate < 50 || baudRate > 4000000) throw new Error('baudRate is out of range')
-  const parity = String(options.parity || DEFAULT_OPEN.parity)
-  const stopBits = String(options.stopBits || DEFAULT_OPEN.stopBits)
-  const dataBits = Number(options.dataBits) > 0 ? Math.floor(Number(options.dataBits)) : DEFAULT_OPEN.dataBits
+  const parity = normalizeParity(options.parity)
+  const stopBits = normalizeStopBits(options.stopBits)
+  const dataBits = normalizeDataBits(options.dataBits)
+  if (!WINDOWS && (parity === 'Mark' || parity === 'Space')) {
+    throw new Error(`${parity} parity is not supported on this platform (use None, Even or Odd)`)
+  }
+  if (stopBits === 'OnePointFive' && dataBits !== 5) {
+    throw new Error('1.5 stop bits need 5 data bits; pick 1 or 2 stop bits instead')
+  }
   const config = {
     // Windows device names are case-insensitive upper-case COMx; POSIX paths are literal.
     port: WINDOWS ? raw.toUpperCase() : raw,
@@ -578,7 +632,7 @@ async function openPort(options = {}) {
     ownerSession: String(options.session || ''),
     ownerAt: Date.now(),
   })
-  note(`${config.port} open at ${config.baudRate} baud`)
+  note(`${config.port} open at ${config.baudRate} baud, ${config.dataBits}${parityLetter(config.parity)}${stopLetter(config.stopBits)}`)
   return { ...connection }
 }
 

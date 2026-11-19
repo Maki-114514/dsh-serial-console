@@ -49,11 +49,22 @@ panel paints immediately instead of waiting on WMI. `RESET` pulses DTR/RTS.
 
 ### Linux and macOS — direct device node
 
-`posix-serial.js` configures the device with one `stty` call
-(`<baud> raw -echo -echoe -echok -iexten -ixon -crtscts cs8 -cstopb -parenb
-clocal`; `stty -f` on macOS, `-F` on Linux), then opens the node with
-`O_RDWR | O_NOCTTY | O_NONBLOCK` and pumps it with `fs.read`/`fs.write`:
+`posix-serial.js` configures the device with `stty` (`-f` on macOS, `-F` on
+Linux), then opens the node with `O_RDWR | O_NOCTTY | O_NONBLOCK` and pumps it
+with `fs.read`/`fs.write`:
 
+- the frame is built from the selected **baud / data bits / parity / stop
+  bits** (default 115200 8N1): `raw -echo -echoe -echok -iexten -ixon -ixoff
+  -istrip -inlcr -igncr -icrnl -opost -isig -icanon -crtscts clocal hupcl
+  cs<n> (-parenb | parenb [-parodd]) (-cstopb | cstopb) min 1 time 0`;
+- the speed is set three ways (`<baud> ispeed <baud> ospeed <baud>`) because a
+  USB bridge that keeps a stale **input** speed decodes correctly-bauded bytes
+  as noise — the classic "garbage at the right baud rate" symptom;
+- after applying it, `stty -a` is read back and compared with what was asked
+  for; a mismatch retries with the explicit `ispeed`/`ospeed` form and then
+  fails loudly with the driver's own numbers instead of streaming garbage;
+- the applied frame is written to the session log (`line: 115200 8N1 on
+  /dev/cu.usbserial-110`) so the setting in force is never implicit;
 - **macOS ports**: every `/dev/cu.*` device (`/dev/cu.usbserial-1420`,
   `/dev/cu.SLAB_USBtoUART`, …); the `tty.*` twin is skipped on purpose because
   `cu.*` does not block on carrier detect.
@@ -92,6 +103,19 @@ On Linux/macOS the port argument is a device path:
 serial { action: "open", port: "/dev/ttyUSB0", baudRate: 921600 }
 serial { action: "open", port: "/dev/cu.usbserial-1420", baudRate: 115200 }
 ```
+
+The frame is selectable on both platforms — `dataBits` (5–8), `parity`
+(`None`/`Even`/`Odd`, plus `Mark`/`Space` on Windows) and `stopBits`
+(`1`/`2`, `1.5` with 5 data bits on Windows):
+
+```
+serial { action: "open", port: "COM6", baudRate: 9600, parity: "Even", dataBits: 7, stopBits: "One" }
+serial { action: "open", port: "/dev/cu.usbserial-110", baudRate: 115200, dataBits: 8, parity: "None", stopBits: "Two" }
+```
+
+The Serial view has matching Bits / Parity / Stop selectors next to the baud
+list, and both the status line and the panel header show the frame in force
+(`/dev/cu.usbserial-110 · 115200 8N1`).
 
 `read` blocks up to `waitMs` (max 15000) for new output instead of returning an
 empty string, which is what makes "reset and read the boot log" one tool call

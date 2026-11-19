@@ -48,6 +48,14 @@ window.__ModuleLoader__.load({
       'ports': 'Port',
       'refresh': 'Refresh ports',
       'baud': 'Baud',
+      'dataBits': 'Bits',
+      'parity': 'Parity',
+      'stopBits': 'Stop',
+      'parityNone': 'none',
+      'parityEven': 'even',
+      'parityOdd': 'odd',
+      'stopOne': '1 bit',
+      'stopTwo': '2 bits',
       'ending': 'Ending',
       'send': 'Send',
       'clear': 'Clear',
@@ -84,6 +92,14 @@ window.__ModuleLoader__.load({
       'ports': '端口',
       'refresh': '刷新端口',
       'baud': '波特率',
+      'dataBits': '数据位',
+      'parity': '校验',
+      'stopBits': '停止位',
+      'parityNone': '无',
+      'parityEven': '偶',
+      'parityOdd': '奇',
+      'stopOne': '1 位',
+      'stopTwo': '2 位',
       'ending': '结尾符',
       'send': '发送',
       'clear': '清空',
@@ -463,6 +479,34 @@ window.__ModuleLoader__.load({
 
     const BAUDS = [9600, 19200, 38400, 57600, 74880, 115200, 230400, 460800, 921600]
 
+    // Frame format: data bits, parity, stop bits. Sent with every open() call so
+    // a board that is not 8N1 (7E1 bootloader prompts, 8E1 controllers) reads
+    // correctly instead of arriving as noise.
+    const DATA_BITS = ['8', '7', '6', '5']
+    const PARITIES = [
+      ['None', 'N'],
+      ['Even', 'E'],
+      ['Odd', 'O'],
+    ]
+    const STOPBITS = [
+      ['One', '1'],
+      ['Two', '2'],
+    ]
+
+    function frameLabel(dataBits, parity, stopBits) {
+      const parityLetter = paritiesLetter(parity)
+      const stop = stopBits === 'Two' ? '2' : stopBits === 'OnePointFive' ? '1.5' : '1'
+      return `${dataBits}${parityLetter}${stop}`
+    }
+
+    function paritiesLetter(parity) {
+      if (parity === 'Even') return 'E'
+      if (parity === 'Odd') return 'O'
+      if (parity === 'Mark') return 'M'
+      if (parity === 'Space') return 'S'
+      return 'N'
+    }
+
     // ------------------------------------------------------------- tab view
 
     function SerialView(props) {
@@ -473,6 +517,9 @@ window.__ModuleLoader__.load({
       const [follow, setFollow] = React.useState(true)
       const [port, setPort] = React.useState('')
       const [baud, setBaud] = React.useState('115200')
+      const [dataBits, setDataBits] = React.useState('8')
+      const [parity, setParity] = React.useState('None')
+      const [stopBits, setStopBits] = React.useState('One')
       const [ending, setEnding] = React.useState('crlf')
       const [draft, setDraft] = React.useState('')
 
@@ -521,7 +568,10 @@ window.__ModuleLoader__.load({
         if (!connected || portTouchedRef.current) return
         if (connection.port) setPort(connection.port)
         if (connection.baudRate) setBaud(String(connection.baudRate))
-      }, [connected, connection.port, connection.baudRate])
+        if (connection.dataBits) setDataBits(String(connection.dataBits))
+        if (connection.parity) setParity(String(connection.parity))
+        if (connection.stopBits) setStopBits(String(connection.stopBits))
+      }, [connected, connection.port, connection.baudRate, connection.dataBits, connection.parity, connection.stopBits])
 
       const run = async (label, action) => {
         setBusy(label)
@@ -542,9 +592,18 @@ window.__ModuleLoader__.load({
           // The server normalises Windows COM names itself (openPort()).
           const name = port.trim()
           if (!name) throw new Error(t('choosePort'))
-          await call('/open', { port: name, baudRate: Number(baud) || 115200, session: sessionId })
+          await call('/open', {
+            port: name,
+            baudRate: Number(baud) || 115200,
+            dataBits: Number(dataBits) || 8,
+            parity,
+            stopBits,
+            session: sessionId,
+          })
           portTouchedRef.current = true
-          appendEntries([{ kind: 'sys', text: `${name} @ ${baud} — ${t('connected')}\n` }])
+          appendEntries([
+            { kind: 'sys', text: `${name} @ ${baud} ${frameLabel(dataBits, parity, stopBits)} — ${t('connected')}\n` },
+          ])
           await poll()
         })
 
@@ -580,7 +639,13 @@ window.__ModuleLoader__.load({
       const ports = (snap && snap.ports) || []
       const bridge = (snap && snap.bridge) || {}
       const supported = !snap || snap.supported !== false
-      const statusText = connected ? `${connection.port} · ${connection.baudRate}` : t('disconnected')
+      const statusText = connected
+        ? `${connection.port} · ${connection.baudRate} ${frameLabel(
+            String(connection.dataBits || 8),
+            connection.parity || 'None',
+            connection.stopBits || 'One',
+          )}`
+        : t('disconnected')
       const shown = error || pollError
 
       return h(
@@ -656,6 +721,51 @@ window.__ModuleLoader__.load({
                 onChange: (event) => setBaud(event.target.value),
               },
               BAUDS.map((value) => h('option', { key: value, value: String(value) }, String(value))),
+            ),
+          ),
+          h(
+            'label',
+            { className: 'sc-field' },
+            h('span', { className: 'sc-muted' }, t('dataBits')),
+            h(
+              'select',
+              {
+                className: 'sc-select',
+                value: dataBits,
+                disabled: connected || Boolean(busy),
+                onChange: (event) => setDataBits(event.target.value),
+              },
+              DATA_BITS.map((value) => h('option', { key: value, value }, value)),
+            ),
+          ),
+          h(
+            'label',
+            { className: 'sc-field' },
+            h('span', { className: 'sc-muted' }, t('parity')),
+            h(
+              'select',
+              {
+                className: 'sc-select',
+                value: parity,
+                disabled: connected || Boolean(busy),
+                onChange: (event) => setParity(event.target.value),
+              },
+              PARITIES.map(([value, short]) => h('option', { key: value, value }, `${short} (${t(`parity${value}`)})`)),
+            ),
+          ),
+          h(
+            'label',
+            { className: 'sc-field' },
+            h('span', { className: 'sc-muted' }, t('stopBits')),
+            h(
+              'select',
+              {
+                className: 'sc-select',
+                value: stopBits,
+                disabled: connected || Boolean(busy),
+                onChange: (event) => setStopBits(event.target.value),
+              },
+              STOPBITS.map(([value, short]) => h('option', { key: value, value }, `${short} (${t(`stop${value}`)})`)),
             ),
           ),
           connected
@@ -951,7 +1061,15 @@ window.__ModuleLoader__.load({
             { className: 'sc-drawer-head' },
             h('span', { className: `sc-dot${error ? ' is-err' : ' is-on'}` }),
             h('span', { className: 'sc-title' }, translate('drawerTitle')),
-            h('span', { className: 'sc-muted' }, `${connection.port} · ${connection.baudRate}`),
+            h(
+              'span',
+              { className: 'sc-muted' },
+              `${connection.port} · ${connection.baudRate} ${frameLabel(
+                String(connection.dataBits || 8),
+                connection.parity || 'None',
+                connection.stopBits || 'One',
+              )}`,
+            ),
             h('span', { className: 'sc-spacer' }),
             h(
               'button',

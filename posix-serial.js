@@ -31,41 +31,113 @@ const DARWIN = process.platform === 'darwin'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
+const PARITY_TOKENS = {
+  none: ['-parenb'],
+  even: ['parenb', '-parodd'],
+  odd: ['parenb', 'parodd'],
+}
+
+const STOP_TOKENS = {
+  one: ['-cstopb'],
+  two: ['cstopb'],
+  onepointfive: ['cstopb'],
+}
+
+const PARITY_LETTER = { none: 'N', even: 'E', odd: 'O', mark: 'M', space: 'S' }
+const STOP_LETTER = { one: '1', two: '2', onepointfive: '1.5' }
+
+/**
+ * Translate the plugin's line options into `stty` settings.
+ *
+ * The speed is expressed three ways on purpose: a bare operand means "both
+ * speeds" to GNU stty, while BSD stty (macOS) is happier with explicit
+ * `ispeed`/`ospeed`. USB bridges need the input speed set as well, and a stale
+ * input speed is exactly what turns a correctly-bauded stream into garbage.
+ */
+export function buildLineConfig(config) {
+  const input = config || {}
+  const baudRate = Number(input.baudRate) > 0 ? Math.floor(Number(input.baudRate)) : 115200
+  const dataBits = Number(input.dataBits) > 0 ? Math.floor(Number(input.dataBits)) : 8
+  if (dataBits < 5 || dataBits > 8) throw new Error('dataBits must be 5 to 8')
+  const parity = String(input.parity || 'None').toLowerCase()
+  const stopBits = String(input.stopBits || 'One').toLowerCase()
+  const parityTokens = PARITY_TOKENS[parity]
+  if (!parityTokens) {
+    throw new Error(`${input.parity} parity is not supported on this platform (use None, Even or Odd)`)
+  }
+  const stopTokens = STOP_TOKENS[stopBits]
+  if (!stopTokens) throw new Error(`${input.stopBits} stop bits are not supported (use 1 or 2)`)
+  if (stopBits === 'onepointfive' && dataBits !== 5) {
+    throw new Error('1.5 stop bits need 5 data bits; pick 1 or 2 stop bits instead')
+  }
+
+  const speed = String(baudRate)
+  const tokens = [
+    speed,
+    'ispeed',
+    speed,
+    'ospeed',
+    speed,
+    'raw',
+    '-echo',
+    '-echoe',
+    '-echok',
+    '-echonl',
+    '-iexten',
+    '-ixon',
+    '-ixoff',
+    '-istrip',
+    '-inlcr',
+    '-igncr',
+    '-icrnl',
+    '-opost',
+    '-isig',
+    '-icanon',
+    '-crtscts',
+    'clocal',
+    'hupcl',
+    `cs${dataBits}`,
+    ...parityTokens,
+    ...stopTokens,
+    'min',
+    '1',
+    'time',
+    '0',
+  ]
+  const label = `${baudRate} ${dataBits}${PARITY_LETTER[parity] || 'N'}${STOP_LETTER[stopBits] || '1'}`
+  return { baudRate, dataBits, parity, stopBits, tokens, label }
+}
+
+/** Read back what the driver really accepted (`stty -a`). */
+export function parseSttyShow(text) {
+  const out = { speed: null, dataBits: null, parenb: false, parodd: false, cstopb: false }
+  const speed = /speed\s+(\d+)/.exec(text)
+  if (speed) out.speed = Number(speed[1])
+  const bits = /(?:^|[\s;])cs([5-8])(?=$|[\s;])/.exec(text)
+  if (bits) out.dataBits = Number(bits[1])
+  out.parenb = /(?:^|[\s;])parenb(?=$|[\s;])/.test(text)
+  out.parodd = /(?:^|[\s;])parodd(?=$|[\s;])/.test(text)
+  out.cstopb = /(?:^|[\s;])cstopb(?=$|[\s;])/.test(text)
+  return out
+}
+
 function sttyFlag() {
   // macOS: stty -f /dev/x; Linux: stty -F /dev/x
   return DARWIN ? '-f' : '-F'
 }
 
-function sttyArgs(device, settings) {
+function sttyArgs(device, tokens) {
   const args = [sttyFlag(), device]
-  if (settings) {
-    args.push(
-      String(settings.baudRate),
-      'raw',
-      '-echo',
-      '-echoe',
-      '-echok',
-      '-echonl',
-      '-iexten',
-      '-ixon',
-      '-ixoff',
-      '-crtscts',
-      'cs8',
-      '-cstopb',
-      '-parenb',
-      'clocal',
-      'hupcl',
-    )
-  }
+  if (Array.isArray(tokens)) args.push(...tokens)
   return args
 }
 
 /** Run stty once and resolve with {ok, out}. Never throws. */
-function runStty(device, settings) {
+function runStty(device, tokens) {
   return new Promise((resolve) => {
     let child
     try {
-      child = spawn('stty', sttyArgs(device, settings), { stdio: ['ignore', 'pipe', 'pipe'] })
+      child = spawn('stty', sttyArgs(device, tokens), { stdio: ['ignore', 'pipe', 'pipe'] })
     } catch (error) {
       resolve({ ok: false, out: String(error && error.message) })
       return
@@ -79,6 +151,71 @@ function runStty(device, settings) {
     child.on('error', (error) => resolve({ ok: false, out: String(error && error.message) }))
     child.on('close', (code) => resolve({ ok: code === 0, out: out.trim() }))
   })
+}
+
+/** Does the driver's read-back match the requested frame? */
+function frameMatches(readback, line) {
+  const wantParity = line.parity !== 'none'
+  const wantParodd = line.parity === 'odd'
+  const wantStop2 = line.stopBits !== 'one'
+  if (readback.parenb !== wantParity) return false
+  if (wantParity && readback.parodd !== wantParodd) return false
+  return readback.cstopb === wantStop2
+}
+
+/**
+ * Apply the line settings and prove the driver accepted them.
+ *
+ * `stty` can exit 0 while leaving the input speed untouched, which shows up as
+ * correctly-bauded output rendering as garbage. The read-back check catches
+ * that and retries with the explicit speed operands before giving up with the
+ * driver's own words.
+ */
+async function configureLine(device, config, emitNote) {
+  const line = buildLineConfig(config)
+  const first = await runStty(device, line.tokens)
+  const show = await runStty(device, ['-a'])
+  if (!show.ok) {
+    const missing = /ENOENT|not found|command not found/i.test(`${first.out} ${show.out}`)
+    if (first.ok) {
+      emitNote(`line: ${line.label} on ${device} (stty cannot read the settings back)`)
+      return line
+    }
+    if (missing) {
+      emitNote(`stty unavailable, using the device settings as-is (${device})`)
+      return line
+    }
+    throw new Error(`cannot configure ${device}: ${first.out || 'stty failed'}`)
+  }
+
+  const readback = parseSttyShow(show.out)
+  const speedOk = readback.speed === null || readback.speed === line.baudRate
+  const bitsOk = readback.dataBits === null || readback.dataBits === line.dataBits
+  if (first.ok && speedOk && bitsOk && frameMatches(readback, line)) {
+    emitNote(`line: ${line.label} on ${device}`)
+    return line
+  }
+
+  // Retry without the bare speed operand: some BSD stty builds only honour the
+  // explicit ispeed/ospeed pair for USB bridges.
+  const retryTokens = ['ispeed', String(line.baudRate), 'ospeed', String(line.baudRate), ...line.tokens.slice(5)]
+  const retry = await runStty(device, retryTokens)
+  const second = await runStty(device, ['-a'])
+  if (!second.ok) throw new Error(`cannot configure ${device}: ${retry.out || 'stty failed'}`)
+  const final = parseSttyShow(second.out)
+  const ok =
+    (final.speed === null || final.speed === line.baudRate) &&
+    (final.dataBits === null || final.dataBits === line.dataBits) &&
+    frameMatches(final, line)
+  if (!ok) {
+    throw new Error(
+      `cannot set ${line.label} on ${device}: stty reports speed ${final.speed === null ? '?' : final.speed}, ` +
+        `${final.dataBits === null ? '?' : final.dataBits} data bits, parity ${final.parenb ? (final.parodd ? 'odd' : 'even') : 'off'}, ` +
+        `${final.cstopb ? 2 : 1} stop bit(s) (${retry.out || show.out || 'no detail'})`,
+    )
+  }
+  emitNote(`line: ${line.label} on ${device}`)
+  return line
 }
 
 function describeError(error) {
@@ -232,13 +369,7 @@ export function createPosixSerial({ onBytes, onNote } = {}) {
     await shutdown()
     state.lastError = ''
 
-    const stty = await runStty(device, config)
-    if (!stty.ok) {
-      // A missing stty is not fatal: the device may already be configured.
-      const missing = /ENOENT|not found|command not found/i.test(stty.out)
-      if (!missing) throw new Error(`cannot configure ${device}: ${stty.out || 'stty failed'}`)
-      emitNote(`stty unavailable, using the device settings as-is (${device})`)
-    }
+    const stty = await configureLine(device, config, emitNote)
 
     let handle
     try {
@@ -250,7 +381,7 @@ export function createPosixSerial({ onBytes, onNote } = {}) {
     state.handle = handle
     state.fd = typeof handle.fd === 'number' ? handle.fd : null
     state.device = device
-    state.config = { ...config, port: device }
+    state.config = { ...config, port: device, line: stty.label }
     state.closed = false
     state.reading = true
     state.generation += 1
