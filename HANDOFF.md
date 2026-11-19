@@ -4,10 +4,11 @@
 所以最省事的做法是：`git clone` 仓库，再读本文。
 
 - 仓库：<https://github.com/Maki-114514/dsh-serial-console>
-- 当前版本：**0.3.1**（tag `v0.3.1`，commit `584b22e`）
+- 当前版本：**0.4.0**（main 分支；最近一次发布 tag 仍是 `v0.3.1`）
 - 平台：Windows / Linux / macOS 一套代码，运行时按 `process.platform` 自动选传输层
-- 状态：Windows 全链路已实测（含真实 ESP32 读取）；macOS 已实现并修过两轮 bug，
-  当前待验证「正确波特率下全是乱码」是否已被 v0.3.0/v0.3.1 修掉
+- 状态：Windows 全链路已实测（含真实 ESP32 读取）；macOS 已在 CP2102N + ESP32-S31 上实测通过
+  （115200 读到启动日志，见 6.1）。0.4.0 的内容：修复「先 open 再 stty」的驱动复位问题、
+  标签状态点、日志着色（ESP 级别 + 自定义规则）、面板逐帧跟随与更省的 presence 轮询
 
 ---
 
@@ -56,10 +57,10 @@ Host（index.js，Cordis 插件）                          │
 
 | 文件 | 作用 | 关键位置 |
 | --- | --- | --- |
-| `index.js` | Host 半边：缓冲、路由、工具、平台分发、提示段 | `TRANSPORT` :51，`pushBytes` :263，`handleLine` :279，`startBridge` :403，`listPorts` :497，`normalizePort` :517，`normalizeParity/StopBits/DataBits` :545/:562/:570，`openPort` :579，`closePort` :639，`writeText` :667，`resetTarget` :693，`snapshot` :705，`waitForData` :741，`apply` :822，路由 :853-904，`systemPrompt.section` :932，工具定义 :945 |
-| `posix-serial.js` | Linux/macOS 传输层：stty 配置 + 回读校验 + fs 读写 | `PARITY_TOKENS` :34，`STOP_TOKENS` :40，`buildLineConfig` :57，`parseSttyShow` :115，`runStty` :139，`frameMatches` :160，`configureLine` :177，`createPosixSerial` :267 |
+| `index.js` | Host 半边：缓冲、路由、工具、平台分发、提示段 | `TRANSPORT` :51，`pushBytes` :280，`handleLine` :296，`startBridge` :420，`listPorts` :514，`normalizePort` :534，`normalizeParity/StopBits/DataBits` :562/:579/:587，`openPort` :596，`closePort` :656，`writeText` :687，`resetTarget` :713，`snapshot` :725，`waitForData` :762，`apply` :843，`systemPrompt.section` :953，工具定义 :966 |
+| `posix-serial.js` | Linux/macOS 传输层：stty 配置 + 回读校验 + fs 读写 | `PARITY_TOKENS` :34，`STOP_TOKENS` :40，`buildLineConfig` :57，`parseSttyShow` :115，`runStty` :139，`frameMatches` :160，`configureLine` :177，`createPosixSerial` :267，`open`（先 open 再配置）:395 |
 | `serial-host.ps1` | Windows 桥：持有 `SerialPort`，行协议 | `Get-PortList`、`Open`（含 `ReadBufferSize`/`WriteTimeout`/`ReadTimeout`）、主循环 `Start-Sleep -Milliseconds 4` |
-| `client.js` | 浏览器半边：标签页、右侧面板、探针、轮询 | `API` :21，`POLL_*` :22-25，`SerialView` :512，`findFlow` :841，`PresenceProbe` :895，`applyReserve` :972，`computeDock` :1003，`SerialDrawer` :1019，槽位注册 :1108/:1122 |
+| `client.js` | 浏览器半边：标签页、右侧面板、探针、轮询、日志着色 | `API` :21，`POLL_*` :22-28，`buildPaint` :413，`paintText` :501，`LogLine` :727，`Switch` :738，`RuleRow` :759，`SerialView` :865，`findFlow` :1277，`PresenceProbe` :1461，`applyReserve` :1541，`computeDock` :1572，`SerialDrawer` :1651，槽位注册 :1786/:1840 |
 | `package.json` | DSH bundle 元数据（`dsh.bundle.patch` / `dsh.client`）与版本 | — |
 | `cordis.patch.yml` | 插件挂载补丁（`insert` 一条 entry） | — |
 | `locale/en.json`、`locale/zh.json` | 插件页标题/描述 | — |
@@ -76,6 +77,7 @@ Host（index.js，Cordis 插件）                          │
 | `v0.2.3` | `b8bd075` | **修 Mac 端口路径被大写**导致 `port must be a device path…`；新增 `normalizePort`（标签、`\\.\COM3`、零宽字符、裸 `cu.*`/`ttyUSB*`） |
 | `v0.3.0` | `84911ac` | **乱码修复**（ispeed/ospeed 三写 + `stty -a` 回读校验 + 显式重试）、**数据位/校验/停止位可选**、`line: …` 生效帧格式日志 |
 | `v0.3.1` | `584b22e` | 补齐 `-ignbrk -brkint -parmrk`（对齐 `cfmakeraw`）；stty 关键字不被支持时退回最小参数集 |
+| `0.4.0`（main，未打 tag） | 本次提交 | **先 open 再 stty**（DriverKit 串口驱动在最后一个 fd 关闭时复位行设置，旧顺序会把波特率丢掉）；标签状态点；日志着色（ESP 级别 + 自定义规则）；停靠面板逐帧跟随；presence 轮询 400 ms → 1 s；`closePort` 清掉陈旧错误 |
 
 测试数据点（Windows，用于对照）：
 
@@ -130,9 +132,28 @@ node -e "import('./posix-serial.js').then(async m => {
 
 这条命令能独立验证「是不是插件 UI 的问题」还是「传输层的问题」。
 
+### 5.4 日志着色（客户端，2026-11-19）
+
+纯前端特性，host 一行没改，改完刷新页面即可：
+
+- 两个开关在 Serial 页第三行工具栏；规则列表只在「自定义颜色」打开时出现。
+- 着色发生在渲染层：`LogLine` 把 `paint`（不可变快照，`buildPaint` 带自增
+  `version`）纳入 `React.memo` 比较，因此流式追加只绘新增行，只有改设置才重绘存量。
+- 规则词/hex 键入走 300 ms 防抖（`scheduleHighlight`）再重建 paint，避免每敲一字
+  就把 200k 字符日志重排；开关与增删规则立即提交。
+- 级别色用主题 token（`--dsw-alias-state-error|warn|success-primary`、
+  `--dsw-alias-brand-primary`、`--dsw-alias-label-secondary`），自定义色是字面量。
+  自定义规则先于级别色，列表顺序优先；只作用于 `rx`（`tx`/`sys` 保持原样式）。
+- 识别词按大小写不敏感的子串匹配（不是正则），全/半角逗号、分号都能分列；
+  上限 20 条规则、每规则 50 词、单词 64 字符。
+- 持久化：`localStorage['dsh-serial-console.highlight']`，浏览器本地，不同步到 host。
+- 纯函数单测钩子：`globalThis.__DSH_SERIAL_TEST__ = true` 时模块对象多出
+  `__serialTest = { parseRuleWords, normalizeHex, buildPaint, paintText, colorOfLine }`，
+  浏览器里不设标记就不会暴露；测试脚本见交付说明。
+
 ---
 
-## 6. macOS 乱码：已知、已修、待验
+## 6. macOS 乱码：根因、修复与实测
 
 ### 症状
 
@@ -164,6 +185,44 @@ line: 115200 8N1 on /dev/cu.usbserial-110
 - **没有这行、变成报错** `cannot set … stty reports speed …` → 直接把这段发我：
   它包含驱动真实接受的速度/数据位/校验/停止位，能一步定位。
 - **出现 `(minimal stty set)`** → 该机器的 stty 不认某些关键字，已自动降级；也请把整行发我。
+
+### 6.1 实测根因（2026-11-19，macOS + CP2102N，DriverKit 串口驱动）
+
+上一节的「输入/输出速度不同步」假设在 CP2102N 上**不是**根因。真实原因是**设置顺序**：
+
+- 该驱动节点为 `/dev/cu.usbserial-210`（Silicon Labs CP2102N，Apple `com.apple.driver.driverkit.serial` 链路）。
+  设备在**没有 fd 打开**时，行设置不会保留：最后一条 fd 关闭后速度回到驱动默认 9600。
+- 因此旧代码「先 `stty -f <dev> …` 再 `open()`」里的设置在 `open()` 生效那一刻就被驱动重置成 9600，
+  紧接着 `stty -a` 回读自然报 `speed 9600`，于是出现
+  `cannot set 115200 8N1 on /dev/cu.usbserial-210: stty reports speed 9600 …`。
+- 实测对照（同一条命令，仅改变「是否持有 fd」）：
+
+  | 操作 | `stty -a` 读回 |
+  |---|---|
+  | 设备关闭时 `stty -f dev 115200` | 仍是 9600（退出码 0，静默忽略） |
+  | 先 `open(dev)` 持有 fd，再 `stty -f dev 115200` | 115200，且在 fd 关闭前一直保持 |
+  | fd 关闭后 | 回到 9600 |
+
+- **修复**：`posix-serial.js` 的 `open()` 改为「先打开 fd → 再 `configureLine()` → 失败则关闭 fd 并抛错」。
+  回读校验也随之在 fd 持有期间完成，`line: 115200 8N1 on …` 才是真的。
+- **验证**：修复后在 GUI / `serial` 工具打开 115200，`stty -a` 显示 `speed 115200`，并完整读到
+  ESP32-S31 的启动日志（`ESP-ROM:esp32s31-…` / `boot.esp32s31: SPI Speed : 80MHz` 全部可读），
+  说明线上速率确实是 115200 而非「看起来对、实际乱码」。
+- **对第 7 节诊断脚本的影响**：`stty -f dev …` 之后再 `stty -a` 会看到 9600，**这不代表设置失败**。
+  手工验证时必须让设备保持打开，例如：
+
+  ```sh
+  python3 - <<'EOF'
+  import serial, subprocess, time
+  p = '/dev/cu.usbserial-210'
+  s = serial.Serial(p, 115200, timeout=0.2)
+  print(subprocess.run(['stty','-f',p,'-a'],capture_output=True,text=True).stdout.split('\n')[0])
+  time.sleep(1); print(s.read(4096))
+  s.close()
+  EOF
+  ```
+
+  或者直接在插件里点「连接」后看 `serial status` 的 `connection.baudRate` 与日志区输出。
 
 ---
 
@@ -227,7 +286,7 @@ DATA <b64> | NOTE <b64> | ERR <id|-> <b64>
 
 ## 9. 已知限制 / 待办
 
-1. **macOS 乱码最终结论未定**（0.3.1 待你在 Mac 上实测）。
+1. macOS 乱码的根因与修复已在 CP2102N + ESP32-S31 上闭环（见 6.1）；换用其它 USB 桥（CH34x/FTDI/PL2303）时，仍需用第 7 节的诊断脚本确认 `speed` 回读。
 2. `reset` 在 POSIX 上是**尽力而为**：关 fd 触发 DTR 落下（`hupcl`）后重开，能复位多数 ESP32；
    需要 RTS 脉冲的自复位电路可能仍要用板载按钮或 `esptool --before default_reset`。
 3. Linux 需要用户在 `dialout` 组：`sudo usermod -aG dialout $USER`，重新登录。
@@ -236,6 +295,10 @@ DATA <b64> | NOTE <b64> | ERR <id|-> <b64>
 5. 插件安装是「先移除再安装」，没有版本升级命令。
 6. 右侧面板只在**本会话的对话页**显示；其它会话、其它页面不显示（这是刻意设计）。
 7. 面板可停靠的最小宽度 176 px，窗口更窄时自动隐藏并在串口页提示。
+8. 日志着色规则只存在当前浏览器（`localStorage`），没有导出/导入，也不随会话同步；
+   自定义色是字面量，不跟随明暗主题（级别色跟随）。
+9. 级别识别依赖 ESP-IDF 的 `L (timestamp)` 行首格式；其它日志风格只能靠自定义
+   识别词整行着色。
 
 ---
 
